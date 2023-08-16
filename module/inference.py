@@ -2,54 +2,7 @@ from typing import List
 
 import torch
 
-from .module import Model
-
-
-class AITemplateModelWrapper(torch.nn.Module):
-    def __init__(
-        self,
-        unet_ait_exe: Model,
-        alphas_cumprod: torch.Tensor,
-    ):
-        super().__init__()
-        self.alphas_cumprod = alphas_cumprod
-        self.unet_ait_exe = unet_ait_exe
-
-    def apply_model(
-        self,
-        x: torch.Tensor,
-        t: torch.Tensor,
-        c_crossattn = None,
-        c_concat = None,
-        control = None,
-        c_adm = None,
-        transformer_options = None,
-    ):
-        timesteps_pt = t
-        latent_model_input = x
-        encoder_hidden_states = None
-        down_block_residuals = None
-        mid_block_residual = None
-        add_embeds = None
-        if c_crossattn is not None:
-            encoder_hidden_states = torch.cat(c_crossattn, dim=1)
-        if c_concat is not None:
-            latent_model_input = torch.cat([x] + c_concat, dim=1)
-        if control is not None:
-            down_block_residuals = control["output"]
-            mid_block_residual = control["middle"][0]
-        if c_adm is not None:
-            add_embeds = c_adm
-        return unet_inference(
-            self.unet_ait_exe,
-            latent_model_input=latent_model_input,
-            timesteps=timesteps_pt,
-            encoder_hidden_states=encoder_hidden_states,
-            down_block_residuals=down_block_residuals,
-            mid_block_residual=mid_block_residual,
-            add_embeds=add_embeds,
-        )
-
+from aitemplate.compiler import Model
 
 def unet_inference(
     exe_module: Model,
@@ -105,7 +58,7 @@ def unet_inference(
             repeat=4,
         )
         print(f"unet latency: {t} ms, it/s: {1000 / t}")
-    return noise_pred.cpu()
+    return noise_pred
 
 
 def controlnet_inference(
@@ -122,7 +75,7 @@ def controlnet_inference(
     if controlnet_cond.shape[0] != latent_model_input.shape[0]:
         controlnet_cond = controlnet_cond.expand(latent_model_input.shape[0], -1, -1, -1)
     if type(encoder_hidden_states) == dict:
-        encoder_hidden_states = torch.cat(encoder_hidden_states['c_crossattn'], 1)
+        encoder_hidden_states = encoder_hidden_states['c_crossattn']
     inputs = {
         "latent_model_input": latent_model_input.permute((0, 2, 3, 1))
         .contiguous()

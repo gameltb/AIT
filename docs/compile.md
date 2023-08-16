@@ -8,6 +8,7 @@ git clone --recursive https://github.com/facebookincubator/AITemplate
 cd AITemplate/python
 python setup.py bdist_wheel
 pip install dist/*.whl
+pip install dist/*.whl --force-reinstall --no-deps
 ```
 
 ### VRAM Usage

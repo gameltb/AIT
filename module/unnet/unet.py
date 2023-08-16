@@ -13,7 +13,6 @@
 #  limitations under the License.
 #
 import sys
-import torch
 from aitemplate.compiler import compile_model
 from aitemplate.frontend import IntVar, Tensor, DynamicProfileStrategy
 from aitemplate.testing import detect_target
@@ -21,19 +20,14 @@ from aitemplate.testing import detect_target
 from ..modeling.unet_2d_condition import (
     UNet2DConditionModel as ait_UNet2DConditionModel,
 )
-from .util import mark_output
-from .release import process
-from ait.util.mapping import map_unet
+
 
 def compile_unet(
-    pt_mod,
     batch_size=(1, 8),
     height=(64, 2048),
     width=(64, 2048),
-    clip_chunks=1,
-    out_dir="./out",
+    clip_chunks=(1, 8),
     work_dir="./tmp",
-    dim=320,
     hidden_dim=1024,
     use_fp16_acc=False,
     convert_conv_to_gemm=False,
@@ -41,9 +35,8 @@ def compile_unet(
     attention_head_dim=[5, 10, 20, 20],  # noqa: B006
     model_name="UNet2DConditionModel",
     use_linear_projection=False,
-    constants=True,
     block_out_channels=(320, 640, 1280, 1280),
-    down_block_types= (
+    down_block_types=(
         "CrossAttnDownBlock2D",
         "CrossAttnDownBlock2D",
         "CrossAttnDownBlock2D",
@@ -67,24 +60,22 @@ def compile_unet(
         False
     ],
     down_factor=8,
-    time_embedding_dim = None,
+    time_embedding_dim=None,
     conv_in_kernel: int = 3,
-    projection_class_embeddings_input_dim = None,
-    addition_embed_type = None,
-    addition_time_embed_dim = None,
-    transformer_layers_per_block = 1,
+    projection_class_embeddings_input_dim=None,
+    addition_embed_type=None,
+    addition_time_embed_dim=None,
+    transformer_layers_per_block=1,
     dtype="float16",
+    dll_name="UNet2DConditionModel.so"
 ):
-    _batch_size = batch_size
-    _height = height
-    _width = width
     xl = False
     if projection_class_embeddings_input_dim is not None:
         xl = True
     if isinstance(only_cross_attention, bool):
         only_cross_attention = [only_cross_attention] * len(block_out_channels)
     if isinstance(transformer_layers_per_block, int):
-            transformer_layers_per_block = [transformer_layers_per_block] * len(down_block_types)
+        transformer_layers_per_block = [transformer_layers_per_block] * len(down_block_types)
     if isinstance(attention_head_dim, int):
         attention_head_dim = (attention_head_dim,) * len(down_block_types)
 
@@ -111,13 +102,7 @@ def compile_unet(
     )
     ait_mod.name_parameter_tensor()
 
-    # set AIT parameters
-    pt_mod = pt_mod.eval()
-    params_ait = map_unet(pt_mod, dim=dim, in_channels=in_channels, conv_in_key="conv_in_weight", dtype=dtype)
-
-    static_shape = width[0] == width[1] and height[0] == height[1]
-
-    if static_shape:
+    if width[0] == width[1] and height[0] == height[1]:
         height = height[0] // down_factor
         width = width[0] // down_factor
         height_d = height
@@ -155,16 +140,17 @@ def compile_unet(
         width_4_d = IntVar(values=list(width_4), name="width_4_d")
         height_8_d = IntVar(values=list(height_8), name="height_8_d")
         width_8_d = IntVar(values=list(width_8), name="width_8_d")
+        clip_chunks = 77 * clip_chunks[0], 77 * clip_chunks[1]
 
-    batch_size = batch_size[0], batch_size[1] * 2  # double batch size for unet
-    batch_size = IntVar(values=list(batch_size), name="batch_size")
-
-    if static_shape:
-        embedding_size = 77
+    if batch_size[0] == batch_size[1]:
+        batch_size = batch_size[0]
     else:
-        clip_chunks = 77, 77 * clip_chunks
+        batch_size = IntVar(values=list(batch_size), name="batch_size")
+
+    if clip_chunks[0] == clip_chunks[1]:
+        embedding_size = 77 * clip_chunks[0]
+    else:
         embedding_size = IntVar(values=list(clip_chunks), name="embedding_size")
-        
 
     latent_model_input_ait = Tensor(
         [batch_size, height_d, width_d, in_channels], name="latent_model_input", is_input=True, dtype=dtype
@@ -175,7 +161,7 @@ def compile_unet(
     )
 
     class_labels = None
-    #TODO: better way to handle this, enables class_labels for x4-upscaler
+    # TODO: better way to handle this, enables class_labels for x4-upscaler
     if in_channels == 7:
         class_labels = Tensor(
             [batch_size], name="class_labels", dtype="int64", is_input=True
@@ -212,7 +198,7 @@ def compile_unet(
             is_input=True,
         )
         down_block_residual_2 = Tensor(
-            [batch_size, height_1_d,width_1_d, block_out_channels[0]],
+            [batch_size, height_1_d, width_1_d, block_out_channels[0]],
             name="down_block_residual_2",
             is_input=True,
         )
@@ -267,7 +253,6 @@ def compile_unet(
             is_input=True,
         )
 
-
     Y = ait_mod(
         sample=latent_model_input_ait,
         timesteps=timesteps_ait,
@@ -288,20 +273,6 @@ def compile_unet(
         class_labels=class_labels,
         add_embeds=add_embeds,
     )
-    mark_output(Y)
 
-    target = detect_target(
-        use_fp16_acc=use_fp16_acc, convert_conv_to_gemm=convert_conv_to_gemm
-    )
-    dll_name = model_name + ".dll" if sys.platform == "win32" else model_name + ".so"
-    total_usage = compile_model(
-        Y, target, work_dir, model_name, constants=params_ait if constants else None, dll_name=dll_name,
-    )
-    sd = "v1"
-    if hidden_dim == 1024:
-        sd = "v2"
-    elif hidden_dim == 2048:
-        sd = "xl"
-    vram = round(total_usage / 1024 / 1024)
-    model_type = "unet_control" if controlnet else "unet"
-    process(work_dir, model_name, dll_name, target._arch, _height[-1], _width[-1], _batch_size[-1], vram, out_dir, sd, model_type)
+    target = detect_target(use_fp16_acc=use_fp16_acc, convert_conv_to_gemm=convert_conv_to_gemm)
+    return compile_model(Y, target, work_dir, model_name, dll_name=dll_name)
