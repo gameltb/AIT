@@ -14,6 +14,7 @@ class ModuleMetaUnet(ModuleMetaBase):
     width: list[int, int] = (64, 64)
     height: list[int, int] = (64, 64)
     clip_chunks: list[int, int] = (1, 1)
+    have_control: bool = False
     unnet_config: object = None
 
     @staticmethod
@@ -49,7 +50,8 @@ class AITUnetExe():
                    and cache.height[0] <= self.model_meta.height[0]
                    and cache.height[1] >= self.model_meta.height[1]
                    and cache.clip_chunks[0] <= self.model_meta.clip_chunks[0]
-                   and cache.clip_chunks[1] >= self.model_meta.clip_chunks[1]]
+                   and cache.clip_chunks[1] >= self.model_meta.clip_chunks[1]
+                   and cache.have_control == self.model_meta.have_control]
         if len(modules) == 0:
             return
         print(f"Found {len(modules)} modules for {self.get_module_cache_key()}")
@@ -74,13 +76,14 @@ class AITUnetExe():
                 height1 = 1024
             self.model_meta.height = (height0, height1)
 
-            clip_chunks = self.model_meta.clip_chunks[1]
-            if clip_chunks < 10:
-                clip_chunks = 10
-            self.model_meta.clip_chunks = (1, clip_chunks)
+            self.model_meta.batch_size = (2, 2)
         else:
-            self.model_meta.clip_chunks = (1, self.model_meta.clip_chunks[1])
-        self.model_meta.batch_size = (1, self.model_meta.batch_size[1])
+            self.model_meta.batch_size = (1, self.model_meta.batch_size[1])
+
+        clip_chunks = self.model_meta.clip_chunks[1]
+        if clip_chunks < 10:
+            clip_chunks = 10
+        self.model_meta.clip_chunks = (1, clip_chunks)
 
         model_name = self.get_module_cache_key()
         dll_name = model_name + ".dll" if self.model_meta.os == "windows" else model_name + ".so"
@@ -121,7 +124,7 @@ class AITUnetExe():
             addition_embed_type=None,
             addition_time_embed_dim=None,
             transformer_layers_per_block=1,
-            controlnet=False,
+            controlnet=self.model_meta.have_control,
             down_factor=8,
             dtype="float32" if not self.model_meta.unnet_config['use_fp16'] else "float16",
             use_fp16_acc=True if self.model_meta.unnet_config['use_fp16'] else False,

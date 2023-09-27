@@ -204,7 +204,7 @@ class AitemplateBaseModel(comfy.model_base.BaseModel):
     def init_ait(self):
         self.unet_ait_exe = None
         self.unet_torch_compile_exe = None
-        self.module_meta = ModuleMetaUnet(os=AIT_OS, cuda_version=AIT_CUDA, batch_size=(1, 1),
+        self.module_meta = ModuleMetaUnet(os=AIT_OS, cuda_version=AIT_CUDA, batch_size=(1, 1), have_control=False,
                                           width=(512, 512), height=(512, 512), clip_chunks=(1, 1), unnet_config=self.model_config.unet_config)
 
     def deinit_ait(self):
@@ -234,20 +234,23 @@ class AitemplateBaseModel(comfy.model_base.BaseModel):
         clip_chunks = int(encoder_hidden_states.shape[1]/77)
         width = int(latent_model_input.shape[3]*8)
         height = int(latent_model_input.shape[2]*8)
+        # print(batch_size, clip_chunks, width, height)
         if (self.unet_ait_exe == None
-                or self.module_meta.batch_size[0] > batch_size
-                or self.module_meta.batch_size[1] < batch_size
-                or self.module_meta.clip_chunks[0] > clip_chunks
-                or self.module_meta.clip_chunks[1] < clip_chunks
-                or self.module_meta.width[0] > width
-                or self.module_meta.width[1] < width
-                or self.module_meta.height[0] > height
-                or self.module_meta.height[1] < height
-                ):
+            or self.module_meta.batch_size[0] > batch_size
+            or self.module_meta.batch_size[1] < batch_size
+            or self.module_meta.clip_chunks[0] > clip_chunks
+            or self.module_meta.clip_chunks[1] < clip_chunks
+            or self.module_meta.width[0] > width
+            or self.module_meta.width[1] < width
+            or self.module_meta.height[0] > height
+            or self.module_meta.height[1] < height
+            or self.module_meta.have_control != (control != None)
+            ):
             self.module_meta.batch_size = (batch_size, batch_size)
             self.module_meta.width = (width, width)
             self.module_meta.height = (height, height)
             self.module_meta.clip_chunks = (clip_chunks, clip_chunks)
+            self.module_meta.have_control = (control != None)
 
             module_loader = AITLOADER.get_ait_module(self.module_meta)
 

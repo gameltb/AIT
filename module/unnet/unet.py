@@ -140,7 +140,6 @@ def compile_unet(
         width_4_d = IntVar(values=list(width_4), name="width_4_d")
         height_8_d = IntVar(values=list(height_8), name="height_8_d")
         width_8_d = IntVar(values=list(width_8), name="width_8_d")
-        clip_chunks = 77 * clip_chunks[0], 77 * clip_chunks[1]
 
     if batch_size[0] == batch_size[1]:
         batch_size = batch_size[0]
@@ -150,6 +149,7 @@ def compile_unet(
     if clip_chunks[0] == clip_chunks[1]:
         embedding_size = 77 * clip_chunks[0]
     else:
+        clip_chunks = 77 * clip_chunks[0], 77 * clip_chunks[1]
         embedding_size = IntVar(values=list(clip_chunks), name="embedding_size")
 
     latent_model_input_ait = Tensor(
