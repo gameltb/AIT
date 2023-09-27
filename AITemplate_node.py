@@ -10,7 +10,7 @@ import copy
 
 from .module.loader import AITLoader
 from .module.unnet import ModuleMetaUnet
-from .module.inference import unet_inference,controlnet_inference
+from .module.inference import unet_inference, controlnet_inference
 
 MAX_RESOLUTION = 8192
 
@@ -230,24 +230,35 @@ class AitemplateBaseModel(comfy.model_base.BaseModel):
             mid_block_residual = control["middle"][0]
         if c_adm is not None:
             add_embeds = c_adm
+        batch_size = int(latent_model_input.shape[0])
+        clip_chunks = int(encoder_hidden_states.shape[1]/77)
+        width = int(latent_model_input.shape[3]*8)
+        height = int(latent_model_input.shape[2]*8)
         if (self.unet_ait_exe == None
-            or self.module_meta.batch_size[0] > int(latent_model_input.shape[0])
-            or self.module_meta.batch_size[1] < int(latent_model_input.shape[0])
-            or self.module_meta.clip_chunks[0] > int(encoder_hidden_states.shape[1]/77)
-            or self.module_meta.clip_chunks[1] < int(encoder_hidden_states.shape[1]/77)):
-            self.module_meta.batch_size = (int(latent_model_input.shape[0]), int(latent_model_input.shape[0]))
-            self.module_meta.width = (int(latent_model_input.shape[3]*8), int(latent_model_input.shape[3]*8))
-            self.module_meta.height = (int(latent_model_input.shape[2]*8), int(latent_model_input.shape[2]*8))
-            self.module_meta.clip_chunks = (int(encoder_hidden_states.shape[1]/77), int(encoder_hidden_states.shape[1]/77))
+                or self.module_meta.batch_size[0] > batch_size
+                or self.module_meta.batch_size[1] < batch_size
+                or self.module_meta.clip_chunks[0] > clip_chunks
+                or self.module_meta.clip_chunks[1] < clip_chunks
+                or self.module_meta.width[0] > width
+                or self.module_meta.width[1] < width
+                or self.module_meta.height[0] > height
+                or self.module_meta.height[1] < height
+                ):
+            self.module_meta.batch_size = (batch_size, batch_size)
+            self.module_meta.width = (width, width)
+            self.module_meta.height = (height, height)
+            self.module_meta.clip_chunks = (clip_chunks, clip_chunks)
 
             module_loader = AITLOADER.get_ait_module(self.module_meta)
 
-            module = module_loader.load_cache_exe()
-            if module == None:            
+            module_meta = module_loader.load_cache_exe()
+            if module_meta == None:
                 origin_device = self.alphas_cumprod.device
                 self.to("cpu")
-                module = module_loader.build_exe()
+                module_meta = module_loader.build_exe()
                 self.to(origin_device)
+
+            self.module_meta = module_meta
 
             print("apply_unet to unet_ait_exe")
             module = module_loader.apply_ait_params(self.state_dict(), self.alphas_cumprod.device)

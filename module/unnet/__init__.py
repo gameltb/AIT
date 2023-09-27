@@ -56,12 +56,12 @@ class AITUnetExe():
         print(f"Using {modules[0]}")
 
         self.ait_unet_exe = self.ait_loader.load_module(modules[0])
-        return self.ait_unet_exe
+        return modules[0]
 
     def build_exe(self):
         # if detect_target().name() == "rocm":
         #     convert_conv_to_gemm = False
-        if self.model_meta.batch_size[0] == 1 and self.model_meta.batch_size[1] == 1:
+        if self.model_meta.batch_size[1] == 2:
             width0 = 64
             width1 = self.model_meta.width[1]
             if self.model_meta.width[1] < 1024:
@@ -73,14 +73,20 @@ class AITUnetExe():
             if self.model_meta.height[1] < 1024:
                 height1 = 1024
             self.model_meta.height = (height0, height1)
+
+            clip_chunks = self.model_meta.clip_chunks[1]
+            if clip_chunks < 10:
+                clip_chunks = 10
+            self.model_meta.clip_chunks = (1, clip_chunks)
+        else:
+            self.model_meta.clip_chunks = (1, self.model_meta.clip_chunks[1])
         self.model_meta.batch_size = (1, self.model_meta.batch_size[1])
-        self.model_meta.clip_chunks = (1, self.model_meta.clip_chunks[1])
 
         model_name = self.get_module_cache_key()
         dll_name = model_name + ".dll" if self.model_meta.os == "windows" else model_name + ".so"
 
         print("building ", self.model_meta)
-        
+
         self.ait_unet_exe = unet.compile_unet(
             batch_size=self.model_meta.batch_size,
             height=self.model_meta.height,
@@ -125,7 +131,7 @@ class AITUnetExe():
 
         self.ait_loader.register_module(self.model_meta, f"{self.ait_loader.get_work_dir()}/{model_name}/{dll_name}")
 
-        return self.ait_unet_exe
+        return self.model_meta
 
     def apply_ait_params(self, state_dict, device):
         ait_params = map_unet(convert_ldm_unet_checkpoint(state_dict), in_channels=self.model_meta.unnet_config['in_channels'], conv_in_key="conv_in_weight",
