@@ -2,12 +2,6 @@
  
 Experimental usage of [AITemplate](https://github.com/facebookincubator/AITemplate).
 
-[New XL Modules](https://huggingface.co/Fizzledorf/AITemplateXL)
-
-[Alternative Pre-compiled modules](https://huggingface.co/city96/AITemplate) (by City96)
-
-[Old Pre-compiled modules](https://huggingface.co/datasets/Fizzledorf/AITemplate_V1_V2) for earlier versions of this node.
-
 ## ComfyUI custom node
 
 ### Installation
