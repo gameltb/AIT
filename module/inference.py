@@ -4,6 +4,8 @@ import torch
 
 from aitemplate.compiler import Model
 
+from .util.torch_dtype_from_str import string_to_torch_dtype
+
 def unet_inference(
     exe_module: Model,
     latent_model_input: torch.Tensor,
@@ -143,9 +145,6 @@ def vae_inference(
     if encoder:
         sample = torch.randn(batch, latent_channels, height, width)
         inputs["random_sample"] = torch.permute(sample, (0, 2, 3, 1)).contiguous().to(device)
-    if dtype == "float16":
-        for k, v in inputs.items():
-            inputs[k] = v.half()
     ys = []
     num_outputs = len(exe_module.get_output_name_to_index_map())
     for i in range(num_outputs):
@@ -153,11 +152,9 @@ def vae_inference(
         shape[0] = batch
         shape[1] = height
         shape[2] = width
-        ys.append(torch.empty(shape).to(device))
-        if dtype == "float16":
-            ys[i] = ys[i].half()
+        ys.append(torch.empty(shape,dtype=string_to_torch_dtype(dtype),device=device))
     exe_module.run_with_tensors(inputs, ys, graph_mode=False)
-    vae_out = ys[0].permute((0, 3, 1, 2)).cpu().float()
+    vae_out = ys[0].permute((0, 3, 1, 2))
     return vae_out
 
 

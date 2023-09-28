@@ -6,9 +6,10 @@ import itertools
 
 from module.loader import AITLoader
 from module.unnet import ModuleMetaUnet
+from module.vae import ModuleMetaVAE
 
 base_path = os.path.dirname(os.path.realpath(__file__))
-modules_dir = os.path.join(base_path, "modulesnew")
+modules_dir = os.path.join(base_path, "modules_cache")
 current_loaded_model = None
 
 modules_path = str(modules_dir).replace("\\", "/")
@@ -24,12 +25,24 @@ elif cuda[0] >= 8:
 else:
     raise ValueError(f"Unsupported CUDA version {cuda[0]}.{cuda[1]}")
 
-SD15 = {'use_checkpoint': False, 'image_size': 32, 'out_channels': 4, 'use_spatial_transformer': True, 'legacy': False,
-        'adm_in_channels': None, 'use_fp16': True, 'in_channels': 4, 'model_channels': 320, 'num_res_blocks': 2,
-        'attention_resolutions': [1, 2, 4], 'transformer_depth': [1, 1, 1, 0], 'channel_mult': [1, 2, 4, 4],
-        'transformer_depth_middle': 1, 'use_linear_in_transformer': False, 'context_dim': 768, "num_heads": 8}
-module_meta = ModuleMetaUnet(os=AIT_OS, cuda_version=AIT_CUDA, batch_size=(1, 1),
-                             width=(64, 512), height=(512, 512), clip_chunks=(1, 1), unnet_config=SD15)
+# SD15 = {'use_checkpoint': False, 'image_size': 32, 'out_channels': 4, 'use_spatial_transformer': True, 'legacy': False,
+#         'adm_in_channels': None, 'use_fp16': True, 'in_channels': 4, 'model_channels': 320, 'num_res_blocks': 2,
+#         'attention_resolutions': [1, 2, 4], 'transformer_depth': [1, 1, 1, 0], 'channel_mult': [1, 2, 4, 4],
+#         'transformer_depth_middle': 1, 'use_linear_in_transformer': False, 'context_dim': 768, "num_heads": 8}
+# module_meta = ModuleMetaUnet(os=AIT_OS, cuda_version=AIT_CUDA, batch_size=(1, 1),
+#                              width=(64, 512), height=(512, 512), clip_chunks=(1, 1), unnet_config=SD15)
+
+# module = AITLOADER.get_ait_module(module_meta)
+
+# m = module.load_cache_exe()
+# print(m)
+# if m ==None:
+#     m = module.build_exe()
+#     print(m)
+
+
+module_meta = ModuleMetaVAE(os=AIT_OS, cuda_version=AIT_CUDA, batch_size=(1, 1),
+                             width=(64, 512), height=(512, 512))
 
 module = AITLOADER.get_ait_module(module_meta)
 

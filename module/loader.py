@@ -7,10 +7,10 @@ import tempfile
 
 from aitemplate.compiler import Model
 from . import ModuleMetaBase
-from .unnet import ModuleMetaUnet
-import shutil
-from .unnet import AITUnetExe
+from .unnet import ModuleMetaUnet, AITUnetExe
+from .vae import ModuleMetaVAE, AITVAEExe
 
+import shutil
 import hashlib
 
 
@@ -89,7 +89,8 @@ class AITLoader:
 
     def get_ait_module(self, model_meta: ModuleMetaBase):
         type_map = {
-            ModuleMetaUnet: AITUnetExe
+            ModuleMetaUnet: AITUnetExe,
+            ModuleMetaVAE: AITVAEExe
         }
 
         return type_map[type(model_meta)](self, model_meta)

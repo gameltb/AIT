@@ -1,12 +1,12 @@
-from .AITemplate_node import AITemplateVAEDecode, ApplyAITemplate
+from .AITemplate_node import ApplyAITemplateVae, ApplyAITemplateModel
 
 NODE_CLASS_MAPPINGS = {
-    "AITemplateVAEDecode": AITemplateVAEDecode,
-    "ApplyAITemplate": ApplyAITemplate,
+    "ApplyAITemplateVae": ApplyAITemplateVae,
+    "ApplyAITemplateModel": ApplyAITemplateModel,
 }
 
 # A dictionary that contains the friendly/humanly readable titles for the nodes
 NODE_DISPLAY_NAME_MAPPINGS = {
-    "AITemplateVAEDecode": "VAE Decode (AITemplate)",
-    "ApplyAITemplate": "ApplyAITemplate",
+    "ApplyAITemplateModel": "Apply AITemplate : Model (UNet)",
+    "ApplyAITemplateVae": "Apply AITemplate : Vae",
 }

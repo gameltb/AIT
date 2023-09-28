@@ -8,9 +8,11 @@ import comfy.sd
 import torch
 import copy
 
+from .module.util.torch_dtype_from_str import torch_dtype_to_string
 from .module.loader import AITLoader
 from .module.unnet import ModuleMetaUnet
-from .module.inference import unet_inference, controlnet_inference
+from .module.inference import unet_inference, controlnet_inference, vae_inference
+from .module.vae import ModuleMetaVAE
 
 MAX_RESOLUTION = 8192
 
@@ -123,49 +125,6 @@ class ControlNet(comfy.controlnet.ControlNet):
         self.static_shape = static_shape
 
 
-class AITemplateVAEDecode:
-    @classmethod
-    def INPUT_TYPES(s):
-        return {"required":
-                {
-                    "vae": ("VAE",),
-                    "keep_loaded": (["enable", "disable"], ),
-                    "samples": ("LATENT", ), "vae": ("VAE", )
-                }
-                }
-    RETURN_TYPES = ("IMAGE",)
-    FUNCTION = "decode"
-
-    CATEGORY = "latent"
-
-    def decode(self, vae, keep_loaded, samples):
-        global AITemplateManger
-        batch_number = 1
-
-        module_meta = ModuleMeta(os=AIT_OS, sd_version="v1", cuda_version=AIT_CUDA, batch_size=batch_number,
-                                 width=samples["samples"].shape[3]*8, height=samples["samples"].shape[2]*8, model_type="vae_decode")
-        # load the module
-        module, is_cache = AITemplateManger.load_by_model_meta(module_meta)
-
-        if not is_cache:
-            AITemplateManger.loader.apply_vae(aitemplate_module=module,
-                                              vae=AITemplateManger.loader.compvis_vae(vae.first_stage_model.state_dict()),)
-
-        samples_in = samples["samples"]
-
-        pixel_samples = torch.empty((samples_in.shape[0], 3, round(samples_in.shape[2] * 8), round(samples_in.shape[3] * 8)), device="cpu")
-        for x in range(0, samples_in.shape[0], batch_number):
-            samples = samples_in[x:x+batch_number]
-            pixel_samples[x:x+batch_number] = torch.clamp((vae_inference(module, samples) + 1.0) / 2.0, min=0.0, max=1.0).cpu().float()
-
-        pixel_samples = pixel_samples.cpu().movedim(1, -1)
-
-        if keep_loaded == "disable":
-            AITemplateManger.unload(["vae_decode"])
-
-        return (pixel_samples,)
-
-
 class AitemplateBaseModel(comfy.model_base.BaseModel):
     @staticmethod
     def cast_from_base_model(other):
@@ -236,16 +195,16 @@ class AitemplateBaseModel(comfy.model_base.BaseModel):
         height = int(latent_model_input.shape[2]*8)
         # print(batch_size, clip_chunks, width, height)
         if (self.unet_ait_exe == None
-            or self.module_meta.batch_size[0] > batch_size
-            or self.module_meta.batch_size[1] < batch_size
-            or self.module_meta.clip_chunks[0] > clip_chunks
-            or self.module_meta.clip_chunks[1] < clip_chunks
-            or self.module_meta.width[0] > width
-            or self.module_meta.width[1] < width
-            or self.module_meta.height[0] > height
-            or self.module_meta.height[1] < height
-            or self.module_meta.have_control != (control != None)
-            ):
+                or self.module_meta.batch_size[0] > batch_size
+                or self.module_meta.batch_size[1] < batch_size
+                or self.module_meta.clip_chunks[0] > clip_chunks
+                or self.module_meta.clip_chunks[1] < clip_chunks
+                or self.module_meta.width[0] > width
+                or self.module_meta.width[1] < width
+                or self.module_meta.height[0] > height
+                or self.module_meta.height[1] < height
+                or self.module_meta.have_control != (control != None)
+                ):
             self.module_meta.batch_size = (batch_size, batch_size)
             self.module_meta.width = (width, width)
             self.module_meta.height = (height, height)
@@ -309,7 +268,7 @@ class AitemplateModelPatcher(comfy.model_patcher.ModelPatcher):
         print("unpatch_model ", device_to)
 
 
-class ApplyAITemplate:
+class ApplyAITemplateModel:
     @classmethod
     def INPUT_TYPES(s):
         return {"required": {"model": ("MODEL",),
@@ -323,3 +282,98 @@ class ApplyAITemplate:
     def apply_aitemplate(self, model):
         model = AitemplateModelPatcher.cast_from_model_patcher(model.clone())
         return (model,)
+
+
+class AitemplateAutoencoderKL(comfy.ldm.models.autoencoder.AutoencoderKL):
+    @staticmethod
+    def cast_from_AutoencoderKL(other, vae_data_type):
+        if isinstance(other, comfy.ldm.models.autoencoder.AutoencoderKL):
+            other.__class__ = AitemplateAutoencoderKL
+            other.init_ait(vae_data_type)
+            return other
+        raise ValueError(f"instance must be comfy.ldm.models.autoencoder.AutoencoderKL")
+
+    def cast_to_base_model(self):
+        self.deinit_ait()
+        self.__class__ = comfy.ldm.models.autoencoder.AutoencoderKL
+        return self
+
+    def init_ait(self, vae_data_type):
+        self.ait_exe = None
+        self.torch_compile_exe = None
+        self.module_meta = ModuleMetaVAE(os=AIT_OS, cuda_version=AIT_CUDA, batch_size=(1, 1),
+                                         width=(512, 512), height=(512, 512), vae_data_type=torch_dtype_to_string(vae_data_type))
+
+    def deinit_ait(self):
+        del self.ait_exe
+        del self.module_meta
+        del self.torch_compile_exe
+
+    def decode(self, z):
+        batch_size = int(z.shape[0])
+        width = int(z.shape[3]*8)
+        height = int(z.shape[2]*8)
+        # print(batch_size, clip_chunks, width, height)
+        if (self.ait_exe == None
+                    or self.module_meta.batch_size[0] > batch_size
+                    or self.module_meta.batch_size[1] < batch_size
+                    or self.module_meta.width[0] > width
+                    or self.module_meta.width[1] < width
+                    or self.module_meta.height[0] > height
+                    or self.module_meta.height[1] < height
+                ):
+            self.module_meta.batch_size = (batch_size, batch_size)
+            self.module_meta.width = (width, width)
+            self.module_meta.height = (height, height)
+
+            module_loader = AITLOADER.get_ait_module(self.module_meta)
+
+            module_meta = module_loader.load_cache_exe()
+            if module_meta == None:
+                module_meta = module_loader.build_exe()
+
+            self.module_meta = module_meta
+
+            print("apply_vae to vae_ait_exe")
+            module = module_loader.apply_ait_params(self.state_dict(), z.device)
+            self.ait_exe = module
+        return vae_inference(self.ait_exe, z, device=z.device, dtype=torch_dtype_to_string(z.dtype))
+
+
+class AitemplateVAE(comfy.sd.VAE):
+    @staticmethod
+    def cast_from_VAE(other, keep_loaded):
+        if isinstance(other, comfy.sd.VAE):
+            other.__class__ = AitemplateVAE
+            other.init_ait(keep_loaded)
+            return other
+        raise ValueError(f"instance must be comfy.sd.VAE")
+    
+    def init_ait(self, keep_loaded):
+        self.keep_loaded = keep_loaded
+        if self.keep_loaded:
+            self.offload_device = self.device
+        
+    def decode(self, samples_in):
+        if not (self.keep_loaded and type(self.first_stage_model) == AitemplateAutoencoderKL):
+            self.first_stage_model = AitemplateAutoencoderKL.cast_from_AutoencoderKL(self.first_stage_model.to(self.device), self.vae_dtype)
+        pixel_samples = super().decode(samples_in)
+        if not self.keep_loaded:
+            self.first_stage_model = self.first_stage_model.cast_to_base_model()
+        return pixel_samples
+
+
+class ApplyAITemplateVae:
+    @classmethod
+    def INPUT_TYPES(s):
+        return {"required": {"vae": ("VAE",),
+                             "keep_loaded": (["enable", "disable"], ),
+                             }}
+    RETURN_TYPES = ("VAE",)
+    FUNCTION = "apply_aitemplate"
+
+    CATEGORY = "loaders"
+
+    def apply_aitemplate(self, vae, keep_loaded):
+        vae = AitemplateVAE.cast_from_VAE(copy.copy(vae), keep_loaded == "enable")
+        return (vae,)

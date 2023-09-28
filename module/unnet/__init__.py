@@ -26,7 +26,7 @@ class AITUnetExe():
     def __init__(self, ait_loader, model_meta: ModuleMetaUnet) -> None:
         self.model_meta = model_meta
         self.ait_loader = ait_loader
-        self.ait_unet_exe = None
+        self.ait_exe = None
 
     def get_module_cache_key(self):
         key = f"{self.model_meta.os}_{self.model_meta.unnet_config['context_dim']}_{self.model_meta.cuda_version}_{self.model_meta.width}_{self.model_meta.height}_{self.model_meta.batch_size}_{self.model_meta.clip_chunks}"
@@ -57,13 +57,13 @@ class AITUnetExe():
         print(f"Found {len(modules)} modules for {self.get_module_cache_key()}")
         print(f"Using {modules[0]}")
 
-        self.ait_unet_exe = self.ait_loader.load_module(modules[0])
+        self.ait_exe = self.ait_loader.load_module(modules[0])
         return modules[0]
 
     def build_exe(self):
         # if detect_target().name() == "rocm":
         #     convert_conv_to_gemm = False
-        if self.model_meta.batch_size[1] == 2:
+        if self.model_meta.batch_size[1] <= 2:
             width0 = 64
             width1 = self.model_meta.width[1]
             if self.model_meta.width[1] < 1024:
@@ -76,7 +76,7 @@ class AITUnetExe():
                 height1 = 1024
             self.model_meta.height = (height0, height1)
 
-            self.model_meta.batch_size = (2, 2)
+            self.model_meta.batch_size = (1, 2)
         else:
             self.model_meta.batch_size = (1, self.model_meta.batch_size[1])
 
@@ -90,7 +90,7 @@ class AITUnetExe():
 
         print("building ", self.model_meta)
 
-        self.ait_unet_exe = unet.compile_unet(
+        self.ait_exe = unet.compile_unet(
             batch_size=self.model_meta.batch_size,
             height=self.model_meta.height,
             width=self.model_meta.width,
@@ -127,7 +127,7 @@ class AITUnetExe():
             controlnet=self.model_meta.have_control,
             down_factor=8,
             dtype="float32" if not self.model_meta.unnet_config['use_fp16'] else "float16",
-            use_fp16_acc=True if self.model_meta.unnet_config['use_fp16'] else False,
+            use_fp16_acc=self.model_meta.unnet_config['use_fp16'],
             model_name=model_name,
             work_dir=self.ait_loader.get_work_dir(),
             dll_name=dll_name)
@@ -139,4 +139,4 @@ class AITUnetExe():
     def apply_ait_params(self, state_dict, device):
         ait_params = map_unet(convert_ldm_unet_checkpoint(state_dict), in_channels=self.model_meta.unnet_config['in_channels'], conv_in_key="conv_in_weight",
                               dim=self.model_meta.unnet_config['model_channels'], device=device, dtype="float32" if not self.model_meta.unnet_config['use_fp16'] else "float16")
-        return apply_ait_params(self.ait_unet_exe, ait_params)
+        return apply_ait_params(self.ait_exe, ait_params)
