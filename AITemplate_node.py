@@ -205,6 +205,9 @@ class AitemplateBaseModel(comfy.model_base.BaseModel):
                 or self.module_meta.height[1] < height
                 or self.module_meta.have_control != (control != None)
                 ):
+            if self.unet_ait_exe != None:
+                del self.unet_ait_exe
+
             self.module_meta.batch_size = (batch_size, batch_size)
             self.module_meta.width = (width, width)
             self.module_meta.height = (height, height)
@@ -322,6 +325,9 @@ class AitemplateAutoencoderKL(comfy.ldm.models.autoencoder.AutoencoderKL):
                     or self.module_meta.height[0] > height
                     or self.module_meta.height[1] < height
                 ):
+            if self.ait_exe != None:
+                del self.ait_exe
+
             self.module_meta.batch_size = (batch_size, batch_size)
             self.module_meta.width = (width, width)
             self.module_meta.height = (height, height)
@@ -367,7 +373,7 @@ class ApplyAITemplateVae:
     @classmethod
     def INPUT_TYPES(s):
         return {"required": {"vae": ("VAE",),
-                             "keep_loaded": (["enable", "disable"], ),
+                             "keep_loaded": ("BOOLEAN", {"default": True}),
                              }}
     RETURN_TYPES = ("VAE",)
     FUNCTION = "apply_aitemplate"
@@ -375,5 +381,5 @@ class ApplyAITemplateVae:
     CATEGORY = "loaders"
 
     def apply_aitemplate(self, vae, keep_loaded):
-        vae = AitemplateVAE.cast_from_VAE(copy.copy(vae), keep_loaded == "enable")
+        vae = AitemplateVAE.cast_from_VAE(copy.copy(vae), keep_loaded)
         return (vae,)
