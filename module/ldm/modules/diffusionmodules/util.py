@@ -15,8 +15,8 @@ import torch.nn as nn
 import numpy as np
 from einops import repeat
 
-from comfy.ldm.util import instantiate_from_config
-import comfy.ops
+from ...util import instantiate_from_config
+from ... import ops as comfy_ops
 
 def make_beta_schedule(schedule, n_timestep, linear_start=1e-4, linear_end=2e-2, cosine_s=8e-3):
     if schedule == "linear":
@@ -157,28 +157,48 @@ class CheckpointFunction(torch.autograd.Function):
         del output_tensors
         return (None, None) + input_grads
 
+from aitemplate.compiler import ops
+from aitemplate.frontend import nn, Tensor
+def timestep_embedding(timesteps, embedding_dim, max_period=10000, repeat_only=False, dtype=None):
+    scale = 1.0
+    flip_sin_to_cos = True
+    downscale_freq_shift = 0
+    """
+    This matches the implementation in Denoising Diffusion Probabilistic Models: Create sinusoidal timestep embeddings.
 
-def timestep_embedding(timesteps, dim, max_period=10000, repeat_only=False):
-    """
-    Create sinusoidal timestep embeddings.
     :param timesteps: a 1-D Tensor of N indices, one per batch element.
-                      These may be fractional.
-    :param dim: the dimension of the output.
-    :param max_period: controls the minimum frequency of the embeddings.
-    :return: an [N x dim] Tensor of positional embeddings.
+                    These may be fractional.
+    :param embedding_dim: the dimension of the output. :param max_period: controls the minimum frequency of the
+    embeddings. :return: an [N x dim] Tensor of positional embeddings.
     """
-    if not repeat_only:
-        half = dim // 2
-        freqs = torch.exp(
-            -math.log(max_period) * torch.arange(start=0, end=half, dtype=torch.float32) / half
-        ).to(device=timesteps.device)
-        args = timesteps[:, None].float() * freqs[None]
-        embedding = torch.cat([torch.cos(args), torch.sin(args)], dim=-1)
-        if dim % 2:
-            embedding = torch.cat([embedding, torch.zeros_like(embedding[:, :1])], dim=-1)
+    assert timesteps._rank() == 1, "Timesteps should be a 1d-array"
+
+    half_dim = embedding_dim // 2
+
+    exponent = (-math.log(max_period)) * Tensor(
+        shape=[half_dim], dtype="float16", name="arange"
+    )
+
+    exponent = exponent * (1.0 / (half_dim - downscale_freq_shift))
+
+    emb = ops.exp(exponent)
+    emb = ops.reshape()(timesteps, [-1, 1]) * ops.reshape()(emb, [1, -1])
+
+    # scale embeddings
+    emb = scale * emb
+
+    # concat sine and cosine embeddings
+    if flip_sin_to_cos:
+        emb = ops.concatenate()(
+            [ops.cos(emb), ops.sin(emb)],
+            dim=-1,
+        )
     else:
-        embedding = repeat(timesteps, 'b -> b d', d=dim)
-    return embedding
+        emb = ops.concatenate()(
+            [ops.sin(emb), ops.cos(emb)],
+            dim=-1,
+        )
+    return emb
 
 
 def zero_module(module):
@@ -233,7 +253,7 @@ def conv_nd(dims, *args, **kwargs):
     if dims == 1:
         return nn.Conv1d(*args, **kwargs)
     elif dims == 2:
-        return comfy.ops.Conv2d(*args, **kwargs)
+        return comfy_ops.Conv2d(*args, **kwargs)
     elif dims == 3:
         return nn.Conv3d(*args, **kwargs)
     raise ValueError(f"unsupported dimensions: {dims}")
@@ -243,7 +263,7 @@ def linear(*args, **kwargs):
     """
     Create a linear module.
     """
-    return comfy.ops.Linear(*args, **kwargs)
+    return comfy_ops.Linear(*args, **kwargs)
 
 
 def avg_pool_nd(dims, *args, **kwargs):

@@ -8,10 +8,11 @@ import comfy.sd
 import torch
 import copy
 
+# from .module.stable_diffusion_pipeline_compiler import (compile, CompilationConfig)
 from .module.util.torch_dtype_from_str import torch_dtype_to_string
 from .module.loader import AITLoader
 from .module.unnet import ModuleMetaUnet
-from .module.inference import unet_inference, controlnet_inference, vae_inference
+from .module.inference import controlnet_inference, vae_inference
 from .module.vae import ModuleMetaVAE
 
 MAX_RESOLUTION = 8192
@@ -125,76 +126,115 @@ class ControlNet(comfy.controlnet.ControlNet):
         self.static_shape = static_shape
 
 
-class AitemplateBaseModel(comfy.model_base.BaseModel):
-    @staticmethod
-    def cast_from_base_model(other):
-        if isinstance(other, comfy.model_base.BaseModel):
-            other.__class__ = AitemplateBaseModel
-            other.init_ait()
-            return other
-        raise ValueError(f"instance must be comfy.model_base.BaseModel")
+def get_Aitemplate_model(cls=comfy.model_base.BaseModel):
 
-    def cast_to_base_model(self):
-        self.deinit_ait()
-        self.__class__ = comfy.model_base.BaseModel
-        return self
+    class AitemplateBaseModel(cls):
+        @staticmethod
+        def cast_from_base_model(other):
+            if isinstance(other, cls):
+                other.__class__ = AitemplateBaseModel
+                other.init_ait()
+                return other
+            raise ValueError(f"instance must be {cls}")
 
-    def apply_model_compiled(self, x, t, c_concat=None, c_crossattn=None, c_adm=None, control=None, transformer_options={}):
-        if c_concat is not None:
-            xc = torch.cat([x] + [c_concat], dim=1)
-        else:
-            xc = x
-        context = c_crossattn
-        dtype = self.get_dtype()
-        xc = xc.to(dtype)
-        t = t.to(dtype)
-        context = context.to(dtype)
-        if c_adm is not None:
-            c_adm = c_adm.to(dtype)
+        def cast_to_base_model(self):
+            self.deinit_ait()
+            self.__class__ = cls
+            return self
 
-        if self.unet_torch_compile_exe == None or self.module_meta.batch_size != int(x.shape[0]) or self.module_meta.clip_chunks != int(c_crossattn.shape[1]/77):
-            self.module_meta.batch_size = int(x.shape[0])
-            self.module_meta.width = int(x.shape[3]*8)
-            self.module_meta.height = int(x.shape[2]*8)
-            self.module_meta.clip_chunks = int(c_crossattn.shape[1]/77)
-            self.unet_torch_compile_exe = torch.compile(self.diffusion_model, fullgraph=True, backend="inductor", mode="default")
-        return self.unet_torch_compile_exe(xc, t, context=context, y=c_adm, control=control, transformer_options=transformer_options).float()
+        def apply_model_compiled(self, x, t, c_concat=None, c_crossattn=None, c_adm=None, control=None, transformer_options={}):
+            if c_concat is not None:
+                xc = torch.cat([x] + [c_concat], dim=1)
+            else:
+                xc = x
+            context = c_crossattn
+            dtype = self.get_dtype()
+            xc = xc.to(dtype)
+            t = t.to(dtype)
+            context = context.to(dtype)
+            if c_adm is not None:
+                c_adm = c_adm.to(dtype)
 
-    def init_ait(self):
-        self.unet_ait_exe = None
-        self.unet_torch_compile_exe = None
-        self.module_meta = ModuleMetaUnet(os=AIT_OS, cuda_version=AIT_CUDA, batch_size=(1, 1), have_control=False,
-                                          width=(512, 512), height=(512, 512), clip_chunks=(1, 1), unnet_config=self.model_config.unet_config)
+            if self.unet_torch_compile_exe == None or self.module_meta.batch_size != int(x.shape[0]) or self.module_meta.clip_chunks != int(c_crossattn.shape[1]/77):
+                self.module_meta.batch_size = int(x.shape[0])
+                self.module_meta.width = int(x.shape[3]*8)
+                self.module_meta.height = int(x.shape[2]*8)
+                self.module_meta.clip_chunks = int(c_crossattn.shape[1]/77)
+                self.unet_torch_compile_exe = torch.compile(self.diffusion_model, fullgraph=True, backend="inductor", mode="default")
+            return self.unet_torch_compile_exe(xc, t, context=context, y=c_adm, control=control, transformer_options=transformer_options).float()
 
-    def deinit_ait(self):
-        del self.unet_ait_exe
-        del self.module_meta
-        del self.unet_torch_compile_exe
+        def apply_model_sfast(self, x, t, c_concat=None, c_crossattn=None, c_adm=None, control=None, transformer_options={}):
+            if c_concat is not None:
+                xc = torch.cat([x] + [c_concat], dim=1)
+            else:
+                xc = x
+            context = c_crossattn
+            dtype = self.get_dtype()
+            xc = xc.to(dtype)
+            t = t.to(dtype)
+            context = context.to(dtype)
+            if c_adm is not None:
+                c_adm = c_adm.to(dtype)
 
-    def apply_model(self, x, t, c_concat=None, c_crossattn=None, c_adm=None, control=None, transformer_options={}):
-        # if len(transformer_options) > 0:
-        #     return self.apply_model_compiled(x, t, c_concat=c_concat, c_crossattn=c_crossattn, c_adm=c_adm, control=control, transformer_options=transformer_options)
-        timesteps_pt = t
-        latent_model_input = x
-        encoder_hidden_states = None
-        down_block_residuals = None
-        mid_block_residual = None
-        add_embeds = None
-        if c_crossattn is not None:
-            encoder_hidden_states = c_crossattn
-        if c_concat is not None:
-            latent_model_input = torch.cat([x] + [c_concat], dim=1)
-        if control is not None:
-            down_block_residuals = control["output"]
-            mid_block_residual = control["middle"][0]
-        if c_adm is not None:
-            add_embeds = c_adm
-        batch_size = int(latent_model_input.shape[0])
-        clip_chunks = int(encoder_hidden_states.shape[1]/77)
-        width = int(latent_model_input.shape[3]*8)
-        height = int(latent_model_input.shape[2]*8)
-        # print(batch_size, clip_chunks, width, height)
-        if (self.unet_ait_exe == None
+            return self.compiled_model(xc, t, context=context, y=c_adm, control=control).float()
+
+        def init_ait(self):
+            self.unet_ait_exe = None
+            self.unet_torch_compile_exe = None
+            self.compiled_model = None
+            self.module_meta = ModuleMetaUnet(os=AIT_OS, cuda_version=AIT_CUDA, batch_size=(1, 1), have_control=False,
+                                              width=(512, 512), height=(512, 512), clip_chunks=(1, 1), unnet_config=self.model_config.unet_config)
+
+            # config = CompilationConfig.Default()
+            # # xformers and triton are suggested for achieving best performance.
+            # # It might be slow for triton to generate, compile and fine-tune kernels.
+            # try:
+            #     import xformers
+            #     config.enable_xformers = True
+            # except ImportError:
+            #     print('xformers not installed, skip')
+            # try:
+            #     import triton
+            #     config.enable_triton = True
+            # except ImportError:
+            #     print('triton not installed, skip')
+            # # CUDA Graph is suggested for small batch sizes.
+            # # After capturing, the model only accepts one fixed image size.
+            # # If you want the model to be dynamic, don't enable it.
+            # config.enable_cuda_graph = True
+            # config.enable_jit_freeze = False
+            # self.compiled_model = compile(self.diffusion_model, config)
+
+        def deinit_ait(self):
+            del self.unet_ait_exe
+            del self.module_meta
+            del self.unet_torch_compile_exe
+            del self.compiled_model
+
+        def apply_model(self, x, t, c_concat=None, c_crossattn=None, c_adm=None, control=None, transformer_options={}):
+            if hasattr(self, "hf_device_map"):
+                return super().apply_model(x, t, c_concat=c_concat, c_crossattn=c_crossattn, c_adm=c_adm, control=control, transformer_options=transformer_options)
+            # return self.apply_model_sfast(x, t, c_concat=c_concat, c_crossattn=c_crossattn, c_adm=c_adm, control=control, transformer_options=transformer_options)
+            # if len(transformer_options) > 0:
+            #     return self.apply_model_compiled(x, t, c_concat=c_concat, c_crossattn=c_crossattn, c_adm=c_adm, control=control, transformer_options=transformer_options)
+            if c_concat is not None:
+                xc = torch.cat([x] + [c_concat], dim=1)
+            else:
+                xc = x
+            context = c_crossattn
+            dtype = self.get_dtype()
+            xc = xc.to(dtype)
+            t = t.to(dtype)
+            context = context.to(dtype)
+            if c_adm is not None:
+                c_adm = c_adm.to(dtype)
+
+            batch_size = int(xc.shape[0])
+            clip_chunks = int(c_crossattn.shape[1]/77)
+            width = int(xc.shape[3]*8)
+            height = int(xc.shape[2]*8)
+            # print(batch_size, clip_chunks, width, height)
+            if (self.unet_ait_exe == None
                 or self.module_meta.batch_size[0] > batch_size
                 or self.module_meta.batch_size[1] < batch_size
                 or self.module_meta.clip_chunks[0] > clip_chunks
@@ -205,39 +245,39 @@ class AitemplateBaseModel(comfy.model_base.BaseModel):
                 or self.module_meta.height[1] < height
                 or self.module_meta.have_control != (control != None)
                 ):
-            if self.unet_ait_exe != None:
-                del self.unet_ait_exe
+                if self.unet_ait_exe != None:
+                    del self.unet_ait_exe
+                    self.unet_ait_exe = None
 
-            self.module_meta.batch_size = (batch_size, batch_size)
-            self.module_meta.width = (width, width)
-            self.module_meta.height = (height, height)
-            self.module_meta.clip_chunks = (clip_chunks, clip_chunks)
-            self.module_meta.have_control = (control != None)
+                self.module_meta.batch_size = (batch_size, batch_size)
+                self.module_meta.width = (width, width)
+                self.module_meta.height = (height, height)
+                self.module_meta.clip_chunks = (clip_chunks, clip_chunks)
+                self.module_meta.have_control = (control != None)
 
-            module_loader = AITLOADER.get_ait_module(self.module_meta)
+                module_loader = AITLOADER.get_ait_module(self.module_meta)
 
-            module_meta = module_loader.load_cache_exe()
-            if module_meta == None:
-                origin_device = self.alphas_cumprod.device
-                self.to("cpu")
-                module_meta = module_loader.build_exe()
-                self.to(origin_device)
+                module_meta = module_loader.load_cache_exe()
+                if module_meta == None:
+                    # origin_device = self.alphas_cumprod.device
+                    # self.to("cpu")
+                    module_meta = module_loader.build_exe(control=control)
+                    # self.to(origin_device)
 
-            self.module_meta = module_meta
+                self.module_meta = module_meta
 
-            print("apply_unet to unet_ait_exe")
-            module = module_loader.apply_ait_params(self.state_dict(), self.alphas_cumprod.device)
-            self.unet_ait_exe = module
+                print("apply_unet to unet_ait_exe")
+                sd = self.state_dict()
+                keys = list(sd.keys())
+                for k in keys:
+                    if not k.startswith("diffusion_model."):
+                        sd.pop(k)
+                sd = comfy.utils.state_dict_prefix_replace(sd, {"diffusion_model.": ""})
+                module_loader.set_weights(sd)
+                self.unet_ait_exe = module_loader
 
-        return unet_inference(
-            self.unet_ait_exe,
-            latent_model_input=latent_model_input,
-            timesteps=timesteps_pt,
-            encoder_hidden_states=encoder_hidden_states,
-            down_block_residuals=down_block_residuals,
-            mid_block_residual=mid_block_residual,
-            add_embeds=add_embeds,
-        )
+            return self.unet_ait_exe.apply_model(xc, t, c_crossattn, c_adm, control, transformer_options)
+    return AitemplateBaseModel
 
 
 class AitemplateModelPatcher(comfy.model_patcher.ModelPatcher):
@@ -261,12 +301,14 @@ class AitemplateModelPatcher(comfy.model_patcher.ModelPatcher):
     def patch_model(self, device_to=None):
         super().patch_model(device_to)
         print("patch_model ", device_to)
-        if type(self.model) == comfy.model_base.BaseModel:
-            self.model = AitemplateBaseModel.cast_from_base_model(self.model)
+        self.aitemplate_model_cls = get_Aitemplate_model(type(self.model))
+        self.model = self.aitemplate_model_cls.cast_from_base_model(self.model)
+        return self.model
 
     def unpatch_model(self, device_to=None):
-        if type(self.model) == AitemplateBaseModel:
+        if type(self.model) == self.aitemplate_model_cls:
             self.model = self.model.cast_to_base_model()
+            self.aitemplate_model_cls = None
         super().unpatch_model(device_to)
         print("unpatch_model ", device_to)
 
@@ -274,9 +316,8 @@ class AitemplateModelPatcher(comfy.model_patcher.ModelPatcher):
 class ApplyAITemplateModel:
     @classmethod
     def INPUT_TYPES(s):
-        return {"required": {"model": ("MODEL",),
-                             #  "keep_loaded": (["enable", "disable"], ),
-                             }}
+        return {"required": {"model": ("MODEL",), }}
+
     RETURN_TYPES = ("MODEL",)
     FUNCTION = "apply_aitemplate"
 
@@ -318,13 +359,13 @@ class AitemplateAutoencoderKL(comfy.ldm.models.autoencoder.AutoencoderKL):
         height = int(z.shape[2]*8)
         # print(batch_size, clip_chunks, width, height)
         if (self.ait_exe == None
-                    or self.module_meta.batch_size[0] > batch_size
-                    or self.module_meta.batch_size[1] < batch_size
-                    or self.module_meta.width[0] > width
-                    or self.module_meta.width[1] < width
-                    or self.module_meta.height[0] > height
-                    or self.module_meta.height[1] < height
-                ):
+                or self.module_meta.batch_size[0] > batch_size
+                or self.module_meta.batch_size[1] < batch_size
+                or self.module_meta.width[0] > width
+                or self.module_meta.width[1] < width
+                or self.module_meta.height[0] > height
+                or self.module_meta.height[1] < height
+            ):
             if self.ait_exe != None:
                 del self.ait_exe
 
@@ -354,12 +395,12 @@ class AitemplateVAE(comfy.sd.VAE):
             other.init_ait(keep_loaded)
             return other
         raise ValueError(f"instance must be comfy.sd.VAE")
-    
+
     def init_ait(self, keep_loaded):
         self.keep_loaded = keep_loaded
         if self.keep_loaded:
             self.offload_device = self.device
-        
+
     def decode(self, samples_in):
         if not (self.keep_loaded and type(self.first_stage_model) == AitemplateAutoencoderKL):
             self.first_stage_model = AitemplateAutoencoderKL.cast_from_AutoencoderKL(self.first_stage_model.to(self.device), self.vae_dtype)
@@ -373,8 +414,8 @@ class ApplyAITemplateVae:
     @classmethod
     def INPUT_TYPES(s):
         return {"required": {"vae": ("VAE",),
-                             "keep_loaded": ("BOOLEAN", {"default": True}),
-                             }}
+                             "keep_loaded": ("BOOLEAN", {"default": True}), }}
+
     RETURN_TYPES = ("VAE",)
     FUNCTION = "apply_aitemplate"
 

@@ -1,12 +1,9 @@
 from dataclasses import dataclass
 from .. import ModuleMetaBase
 from . import unet
-from .. import apply_ait_params
-from ..util import convert_ldm_unet_checkpoint
-from ..util.mapping import map_unet
 
 import re
-
+import torch
 
 @dataclass
 class ModuleMetaUnet(ModuleMetaBase):
@@ -60,83 +57,91 @@ class AITUnetExe():
         self.ait_exe = self.ait_loader.load_module(modules[0])
         return modules[0]
 
-    def build_exe(self):
+    def build_exe(self, control=None):
         # if detect_target().name() == "rocm":
         #     convert_conv_to_gemm = False
-        if self.model_meta.batch_size[1] <= 2:
-            width0 = 64
-            width1 = self.model_meta.width[1]
-            if self.model_meta.width[1] < 1024:
-                width1 = 1024
-            self.model_meta.width = (width0, width1)
+        animatediff = False
+        if not animatediff:
+            if self.model_meta.batch_size[1] <= 2:
+                width0 = 64
+                width1 = self.model_meta.width[1]
+                if self.model_meta.width[1] < 1024:
+                    width1 = 1024
+                self.model_meta.width = (width0, width1)
 
-            height0 = 64
-            height1 = self.model_meta.height[1]
-            if self.model_meta.height[1] < 1024:
-                height1 = 1024
-            self.model_meta.height = (height0, height1)
+                height0 = 64
+                height1 = self.model_meta.height[1]
+                if self.model_meta.height[1] < 1024:
+                    height1 = 1024
+                self.model_meta.height = (height0, height1)
 
-            self.model_meta.batch_size = (1, 2)
-        else:
-            self.model_meta.batch_size = (1, self.model_meta.batch_size[1])
+                self.model_meta.batch_size = (1, 2)
+            else:
+                self.model_meta.batch_size = (1, self.model_meta.batch_size[1])
 
-        clip_chunks = self.model_meta.clip_chunks[1]
-        if clip_chunks < 10:
-            clip_chunks = 10
-        self.model_meta.clip_chunks = (1, clip_chunks)
+            clip_chunks = self.model_meta.clip_chunks[1]
+            if clip_chunks < 10:
+                clip_chunks = 10
+            self.model_meta.clip_chunks = (1, clip_chunks)
 
         model_name = self.get_module_cache_key()
         dll_name = model_name + ".dll" if self.model_meta.os == "windows" else model_name + ".so"
 
         print("building ", self.model_meta)
 
-        self.ait_exe = unet.compile_unet(
+        self.ait_exe = unet.compile_unet_comfy(
             batch_size=self.model_meta.batch_size,
-            height=self.model_meta.height,
-            width=self.model_meta.width,
+            height=(int(self.model_meta.height[0]/8), int(self.model_meta.height[1]/8)),
+            width=(int(self.model_meta.width[0]/8), int(self.model_meta.width[1]/8)),
             clip_chunks=self.model_meta.clip_chunks,
-            convert_conv_to_gemm=True,
-            hidden_dim=self.model_meta.unnet_config['context_dim'],
-            attention_head_dim=self.model_meta.unnet_config['num_heads'],
-            use_linear_projection=self.model_meta.unnet_config['use_linear_in_transformer'],
-            block_out_channels=[int(m*self.model_meta.unnet_config['model_channels']) for m in self.model_meta.unnet_config['channel_mult']],
-            down_block_types=[
-                "CrossAttnDownBlock2D",
-                "CrossAttnDownBlock2D",
-                "CrossAttnDownBlock2D",
-                "DownBlock2D"
-            ],
-            up_block_types=[
-                "UpBlock2D",
-                "CrossAttnUpBlock2D",
-                "CrossAttnUpBlock2D",
-                "CrossAttnUpBlock2D"
-            ],
-            in_channels=self.model_meta.unnet_config['in_channels'],
-            out_channels=self.model_meta.unnet_config['out_channels'],
-            class_embed_type=None,
-            num_class_embeds=None,
-            only_cross_attention=False,
-            sample_size=64,
-            time_embedding_dim=None,
-            conv_in_kernel=3,
-            projection_class_embeddings_input_dim=None,
-            addition_embed_type=None,
-            addition_time_embed_dim=None,
-            transformer_layers_per_block=1,
-            controlnet=self.model_meta.have_control,
-            down_factor=8,
-            dtype="float32" if not self.model_meta.unnet_config['use_fp16'] else "float16",
-            use_fp16_acc=self.model_meta.unnet_config['use_fp16'],
-            model_name=model_name,
             work_dir=self.ait_loader.get_work_dir(),
-            dll_name=dll_name)
+            unet_config=self.model_meta.unnet_config, 
+            control=control,
+            dll_name=dll_name,
+            model_name=model_name,
+        )
 
         self.ait_loader.register_module(self.model_meta, f"{self.ait_loader.get_work_dir()}/{model_name}/{dll_name}")
 
         return self.model_meta
 
-    def apply_ait_params(self, state_dict, device):
-        ait_params = map_unet(convert_ldm_unet_checkpoint(state_dict), in_channels=self.model_meta.unnet_config['in_channels'], conv_in_key="conv_in_weight",
-                              dim=self.model_meta.unnet_config['model_channels'], device=device, dtype="float32" if not self.model_meta.unnet_config['use_fp16'] else "float16")
-        return apply_ait_params(self.ait_exe, ait_params)
+    def set_weights(self, sd):
+        constants = map_unet_params(sd)
+        self.ait_exe.set_many_constants_with_tensors(constants)
+
+    def apply_model(self, xc, t, context, y=None, control=None, transformer_options=None):
+        xc = xc.permute((0, 2, 3, 1)).half().contiguous()
+        output = [torch.empty_like(xc)]
+        inputs = {"x": xc, "timesteps": t.half(), "context": context.half()}
+        if y is not None:
+            inputs['y'] = y.half()
+        if control is not None:
+            control_params = unet.map_control_params(control)
+            inputs.update(control_params)
+        self.ait_exe.run_with_tensors(inputs, output) #, graph_mode=False)
+        return output[0].permute((0, 3, 1, 2))
+
+    def unload_model(self):
+        self.ait_exe.close()
+
+def map_unet_params(pt_params):
+    dim = 320
+    params_ait = {}
+    for key, arr in pt_params.items():
+        if len(arr.shape) == 4:
+            arr = arr.permute((0, 2, 3, 1)).contiguous()
+        elif key.endswith("ff.net.0.proj.weight"):
+            w1, w2 = arr.chunk(2, dim=0)
+            params_ait[key.replace(".", "_")] = w1
+            params_ait[key.replace(".", "_").replace("proj", "gate")] = w2
+            continue
+        elif key.endswith("ff.net.0.proj.bias"):
+            w1, w2 = arr.chunk(2, dim=0)
+            params_ait[key.replace(".", "_")] = w1
+            params_ait[key.replace(".", "_").replace("proj", "gate")] = w2
+            continue
+        params_ait[key.replace(".", "_")] = arr.half()
+    params_ait["arange"] = (
+        torch.arange(start=0, end=dim // 2, dtype=torch.float32).cuda().half()
+    )
+    return params_ait

@@ -1,11 +1,5 @@
 from abc import abstractmethod
-import math
-
-import numpy as np
 import torch as th
-import torch.nn as nn
-import torch.nn.functional as F
-
 from .util import (
     checkpoint,
     avg_pool_nd,
@@ -14,8 +8,12 @@ from .util import (
     timestep_embedding,
 )
 from ..attention import SpatialTransformer
-from comfy.ldm.util import exists
-import comfy.ops
+from ...util import exists
+from aitemplate.frontend import nn, Tensor
+from aitemplate.compiler import ops
+from ... import ops as comfy_ops
+
+silu_op = ops.silu
 
 class TimestepBlock(nn.Module):
     """
@@ -70,7 +68,7 @@ class Upsample(nn.Module):
                  upsampling occurs in the inner-two dimensions.
     """
 
-    def __init__(self, channels, use_conv, dims=2, out_channels=None, padding=1, dtype=None, device=None, operations=comfy.ops):
+    def __init__(self, channels, use_conv, dims=2, out_channels=None, padding=1, dtype=None, device=None, operations=None):
         super().__init__()
         self.channels = channels
         self.out_channels = out_channels or channels
@@ -80,19 +78,12 @@ class Upsample(nn.Module):
             self.conv = operations.conv_nd(dims, self.channels, self.out_channels, 3, padding=padding, dtype=dtype, device=device)
 
     def forward(self, x, output_shape=None):
-        assert x.shape[1] == self.channels
-        if self.dims == 3:
-            shape = [x.shape[2], x.shape[3] * 2, x.shape[4] * 2]
-            if output_shape is not None:
-                shape[1] = output_shape[3]
-                shape[2] = output_shape[4]
+        if output_shape is None:
+            x = nn.Upsampling2d(scale_factor=2.0, mode="nearest")(x)
         else:
-            shape = [x.shape[2] * 2, x.shape[3] * 2]
-            if output_shape is not None:
-                shape[0] = output_shape[2]
-                shape[1] = output_shape[3]
-
-        x = F.interpolate(x, size=shape, mode="nearest")
+            b, h, w, c = output_shape()
+            b_, h_, w_, c_ = x.shape()
+            x = nn.Upsampling2d(scale_factor=2.0, mode="nearest")(x, Tensor([b_, h, w, c_]))
         if self.use_conv:
             x = self.conv(x)
         return x
@@ -106,7 +97,7 @@ class Downsample(nn.Module):
                  downsampling occurs in the inner-two dimensions.
     """
 
-    def __init__(self, channels, use_conv, dims=2, out_channels=None, padding=1, dtype=None, device=None, operations=comfy.ops):
+    def __init__(self, channels, use_conv, dims=2, out_channels=None, padding=1, dtype=None, device=None, operations=None):
         super().__init__()
         self.channels = channels
         self.out_channels = out_channels or channels
@@ -122,7 +113,6 @@ class Downsample(nn.Module):
             self.op = avg_pool_nd(dims, kernel_size=stride, stride=stride)
 
     def forward(self, x):
-        assert x.shape[1] == self.channels
         return self.op(x)
 
 
@@ -156,7 +146,7 @@ class ResBlock(TimestepBlock):
         down=False,
         dtype=None,
         device=None,
-        operations=comfy.ops
+        operations=None
     ):
         super().__init__()
         self.channels = channels
@@ -168,8 +158,8 @@ class ResBlock(TimestepBlock):
         self.use_scale_shift_norm = use_scale_shift_norm
 
         self.in_layers = nn.Sequential(
-            nn.GroupNorm(32, channels, dtype=dtype, device=device),
-            nn.SiLU(),
+            operations.GroupNorm(32, channels, dtype=dtype, device=device, use_swish=True),
+            nn.Identity(),
             operations.conv_nd(dims, channels, self.out_channels, 3, padding=1, dtype=dtype, device=device),
         )
 
@@ -185,19 +175,18 @@ class ResBlock(TimestepBlock):
             self.h_upd = self.x_upd = nn.Identity()
 
         self.emb_layers = nn.Sequential(
-            nn.SiLU(),
+            nn.Identity(),
             operations.Linear(
                 emb_channels,
                 2 * self.out_channels if use_scale_shift_norm else self.out_channels, dtype=dtype, device=device
             ),
         )
+
         self.out_layers = nn.Sequential(
-            nn.GroupNorm(32, self.out_channels, dtype=dtype, device=device),
-            nn.SiLU(),
+            operations.GroupNorm(32, self.out_channels, dtype=dtype, device=device, use_swish=True),
+            nn.Identity(),
             nn.Dropout(p=dropout),
-            zero_module(
-                operations.conv_nd(dims, self.out_channels, self.out_channels, 3, padding=1, dtype=dtype, device=device)
-            ),
+            operations.conv_nd(dims, self.out_channels, self.out_channels, 3, padding=1, dtype=dtype, device=device),
         )
 
         if self.out_channels == channels:
@@ -230,9 +219,9 @@ class ResBlock(TimestepBlock):
             h = in_conv(h)
         else:
             h = self.in_layers(x)
-        emb_out = self.emb_layers(emb).type(h.dtype)
-        while len(emb_out.shape) < len(h.shape):
-            emb_out = emb_out[..., None]
+        emb_out = self.emb_layers(silu_op(emb))
+
+        emb_out = ops.reshape()(emb_out, [emb_out.shape()[0], 1, 1, emb_out.shape()[1]])
         if self.use_scale_shift_norm:
             out_norm, out_rest = self.out_layers[0], self.out_layers[1:]
             scale, shift = th.chunk(emb_out, 2, dim=1)
@@ -315,7 +304,7 @@ class UNetModel(nn.Module):
         adm_in_channels=None,
         transformer_depth_middle=None,
         device=None,
-        operations=comfy.ops,
+        operations=comfy_ops,
     ):
         super().__init__()
         assert use_spatial_transformer == True, "use_spatial_transformer has to be true"
@@ -376,11 +365,7 @@ class UNetModel(nn.Module):
         self.predict_codebook_ids = n_embed is not None
 
         time_embed_dim = model_channels * 4
-        self.time_embed = nn.Sequential(
-            operations.Linear(model_channels, time_embed_dim, dtype=self.dtype, device=device),
-            nn.SiLU(),
-            operations.Linear(time_embed_dim, time_embed_dim, dtype=self.dtype, device=device),
-        )
+        self.time_embed = operations.time_embed(model_channels, time_embed_dim, dtype=self.dtype, device=device)
 
         if self.num_classes is not None:
             if isinstance(self.num_classes, int):
@@ -391,11 +376,7 @@ class UNetModel(nn.Module):
             elif self.num_classes == "sequential":
                 assert adm_in_channels is not None
                 self.label_emb = nn.Sequential(
-                    nn.Sequential(
-                        operations.Linear(adm_in_channels, time_embed_dim, dtype=self.dtype, device=device),
-                        nn.SiLU(),
-                        operations.Linear(time_embed_dim, time_embed_dim, dtype=self.dtype, device=device),
-                    )
+                    operations.time_embed(adm_in_channels, time_embed_dim, dtype=self.dtype, device=device)
                 )
             else:
                 raise ValueError()
@@ -584,13 +565,14 @@ class UNetModel(nn.Module):
                 self._feature_size += ch
 
         self.out = nn.Sequential(
-            nn.GroupNorm(32, ch, dtype=self.dtype, device=device),
-            nn.SiLU(),
-            zero_module(operations.conv_nd(dims, model_channels, out_channels, 3, padding=1, dtype=self.dtype, device=device)),
+            operations.GroupNorm(32, ch, dtype=self.dtype, device=device, use_swish=True),
+            nn.Identity(),
+            operations.conv_nd(dims, model_channels, out_channels, 3, padding=1, dtype=self.dtype, device=device),
         )
+
         if self.predict_codebook_ids:
             self.id_predictor = nn.Sequential(
-            nn.GroupNorm(32, ch, dtype=self.dtype, device=device),
+            operations.GroupNorm(32, ch, dtype=self.dtype, device=device),
             operations.conv_nd(dims, model_channels, n_embed, 1, dtype=self.dtype, device=device),
             #nn.LogSoftmax(dim=1)  # change to cross_entropy and produce non-normalized logits
         )
@@ -604,7 +586,7 @@ class UNetModel(nn.Module):
         :param y: an [N] Tensor of labels, if class-conditional.
         :return: an [N x C x ...] Tensor of outputs.
         """
-        transformer_options["original_shape"] = list(x.shape)
+        transformer_options["original_shape"] = list(x.shape())
         transformer_options["current_index"] = 0
         transformer_patches = transformer_options.get("patches", {})
 
@@ -612,14 +594,13 @@ class UNetModel(nn.Module):
             self.num_classes is not None
         ), "must specify y if and only if the model is class-conditional"
         hs = []
-        t_emb = timestep_embedding(timesteps, self.model_channels, repeat_only=False).to(self.dtype)
+        t_emb = timestep_embedding(timesteps, self.model_channels, repeat_only=False, dtype=x.dtype)
         emb = self.time_embed(t_emb)
 
         if self.num_classes is not None:
-            assert y.shape[0] == x.shape[0]
             emb = emb + self.label_emb(y)
 
-        h = x.type(self.dtype)
+        h = x
         for id, module in enumerate(self.input_blocks):
             transformer_options["block"] = ("input", id)
             h = forward_timestep_embed(module, h, emb, context, transformer_options)
@@ -648,14 +629,15 @@ class UNetModel(nn.Module):
                 for p in patch:
                     h, hsp = p(h, hsp, transformer_options)
 
-            h = th.cat([h, hsp], dim=1)
+            h = ops.concatenate()([h, hsp], dim=-1)
+
             del hsp
             if len(hs) > 0:
                 output_shape = hs[-1].shape
             else:
                 output_shape = None
             h = forward_timestep_embed(module, h, emb, context, transformer_options, output_shape)
-        h = h.type(x.dtype)
+
         if self.predict_codebook_ids:
             return self.id_predictor(h)
         else:
