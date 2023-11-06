@@ -126,191 +126,105 @@ class ControlNet(comfy.controlnet.ControlNet):
         self.static_shape = static_shape
 
 
-def get_Aitemplate_model(cls=comfy.model_base.BaseModel):
+class AitemplateBaseModel(torch.nn.Module):
+    def __init__(self, ):
+        super().__init__()
 
-    class AitemplateBaseModel(cls):
-        @staticmethod
-        def cast_from_base_model(other):
-            if isinstance(other, cls):
-                other.__class__ = AitemplateBaseModel
-                other.init_ait()
-                return other
-            raise ValueError(f"instance must be {cls}")
+        self.dtype = torch.float16
 
-        def cast_to_base_model(self):
-            self.deinit_ait()
-            self.__class__ = cls
-            return self
+        self.unet_ait_exe = None
+        self.module_meta = ModuleMetaUnet(os=AIT_OS, cuda_version=AIT_CUDA, batch_size=(1, 1), have_control=False,
+                                          width=(512, 512), height=(512, 512), clip_chunks=(1, 1), unnet_config=None)
 
-        def apply_model_compiled(self, x, t, c_concat=None, c_crossattn=None, c_adm=None, control=None, transformer_options={}):
-            if c_concat is not None:
-                xc = torch.cat([x] + [c_concat], dim=1)
-            else:
-                xc = x
-            context = c_crossattn
-            dtype = self.get_dtype()
-            xc = xc.to(dtype)
-            t = t.to(dtype)
-            context = context.to(dtype)
-            if c_adm is not None:
-                c_adm = c_adm.to(dtype)
+    def set_base_model(self, base_model):
+        self.base_model = base_model
+        self.base_model_state_dict = base_model.state_dict()
+        self.module_meta.unnet_config = base_model.model_config.unet_config
 
-            if self.unet_torch_compile_exe == None or self.module_meta.batch_size != int(x.shape[0]) or self.module_meta.clip_chunks != int(c_crossattn.shape[1]/77):
-                self.module_meta.batch_size = int(x.shape[0])
-                self.module_meta.width = int(x.shape[3]*8)
-                self.module_meta.height = int(x.shape[2]*8)
-                self.module_meta.clip_chunks = int(c_crossattn.shape[1]/77)
-                self.unet_torch_compile_exe = torch.compile(self.diffusion_model, fullgraph=True, backend="inductor", mode="default")
-            return self.unet_torch_compile_exe(xc, t, context=context, y=c_adm, control=control, transformer_options=transformer_options).float()
-
-        def apply_model_sfast(self, x, t, c_concat=None, c_crossattn=None, c_adm=None, control=None, transformer_options={}):
-            if c_concat is not None:
-                xc = torch.cat([x] + [c_concat], dim=1)
-            else:
-                xc = x
-            context = c_crossattn
-            dtype = self.get_dtype()
-            xc = xc.to(dtype)
-            t = t.to(dtype)
-            context = context.to(dtype)
-            if c_adm is not None:
-                c_adm = c_adm.to(dtype)
-
-            return self.compiled_model(xc, t, context=context, y=c_adm, control=control).float()
-
-        def init_ait(self):
-            self.unet_ait_exe = None
-            self.unet_torch_compile_exe = None
-            self.compiled_model = None
-            self.module_meta = ModuleMetaUnet(os=AIT_OS, cuda_version=AIT_CUDA, batch_size=(1, 1), have_control=False,
-                                              width=(512, 512), height=(512, 512), clip_chunks=(1, 1), unnet_config=self.model_config.unet_config)
-
-            # config = CompilationConfig.Default()
-            # # xformers and triton are suggested for achieving best performance.
-            # # It might be slow for triton to generate, compile and fine-tune kernels.
-            # try:
-            #     import xformers
-            #     config.enable_xformers = True
-            # except ImportError:
-            #     print('xformers not installed, skip')
-            # try:
-            #     import triton
-            #     config.enable_triton = True
-            # except ImportError:
-            #     print('triton not installed, skip')
-            # # CUDA Graph is suggested for small batch sizes.
-            # # After capturing, the model only accepts one fixed image size.
-            # # If you want the model to be dynamic, don't enable it.
-            # config.enable_cuda_graph = True
-            # config.enable_jit_freeze = False
-            # self.compiled_model = compile(self.diffusion_model, config)
-
-        def deinit_ait(self):
-            del self.unet_ait_exe
-            del self.module_meta
-            del self.unet_torch_compile_exe
-            del self.compiled_model
-
-        def apply_model(self, x, t, c_concat=None, c_crossattn=None, c_adm=None, control=None, transformer_options={}):
-            if hasattr(self, "hf_device_map"):
-                return super().apply_model(x, t, c_concat=c_concat, c_crossattn=c_crossattn, c_adm=c_adm, control=control, transformer_options=transformer_options)
-            # return self.apply_model_sfast(x, t, c_concat=c_concat, c_crossattn=c_crossattn, c_adm=c_adm, control=control, transformer_options=transformer_options)
-            # if len(transformer_options) > 0:
-            #     return self.apply_model_compiled(x, t, c_concat=c_concat, c_crossattn=c_crossattn, c_adm=c_adm, control=control, transformer_options=transformer_options)
-            if c_concat is not None:
-                xc = torch.cat([x] + [c_concat], dim=1)
-            else:
-                xc = x
-            context = c_crossattn
-            dtype = self.get_dtype()
-            xc = xc.to(dtype)
-            t = t.to(dtype)
-            context = context.to(dtype)
-            if c_adm is not None:
-                c_adm = c_adm.to(dtype)
-
-            batch_size = int(xc.shape[0])
-            clip_chunks = int(c_crossattn.shape[1]/77)
-            width = int(xc.shape[3]*8)
-            height = int(xc.shape[2]*8)
-            # print(batch_size, clip_chunks, width, height)
-            if (self.unet_ait_exe == None
-                or self.module_meta.batch_size[0] > batch_size
-                or self.module_meta.batch_size[1] < batch_size
-                or self.module_meta.clip_chunks[0] > clip_chunks
-                or self.module_meta.clip_chunks[1] < clip_chunks
-                or self.module_meta.width[0] > width
-                or self.module_meta.width[1] < width
-                or self.module_meta.height[0] > height
-                or self.module_meta.height[1] < height
-                or self.module_meta.have_control != (control != None)
+    def forward(self,  x, timesteps=None, context=None, y=None, control=None, transformer_options={}, **kwargs):
+        batch_size = int(x.shape[0])
+        clip_chunks = int(context.shape[1]/77)
+        width = int(x.shape[3]*8)
+        height = int(x.shape[2]*8)
+        # print(batch_size, clip_chunks, width, height)
+        if (self.unet_ait_exe == None
+                    or self.module_meta.batch_size[0] > batch_size
+                    or self.module_meta.batch_size[1] < batch_size
+                    or self.module_meta.clip_chunks[0] > clip_chunks
+                    or self.module_meta.clip_chunks[1] < clip_chunks
+                    or self.module_meta.width[0] > width
+                    or self.module_meta.width[1] < width
+                    or self.module_meta.height[0] > height
+                    or self.module_meta.height[1] < height
+                    or self.module_meta.have_control != (control != None)
                 ):
-                if self.unet_ait_exe != None:
-                    del self.unet_ait_exe
-                    self.unet_ait_exe = None
+            if self.unet_ait_exe != None:
+                del self.unet_ait_exe
+                self.unet_ait_exe = None
 
-                self.module_meta.batch_size = (batch_size, batch_size)
-                self.module_meta.width = (width, width)
-                self.module_meta.height = (height, height)
-                self.module_meta.clip_chunks = (clip_chunks, clip_chunks)
-                self.module_meta.have_control = (control != None)
+            self.module_meta.batch_size = (batch_size, batch_size)
+            self.module_meta.width = (width, width)
+            self.module_meta.height = (height, height)
+            self.module_meta.clip_chunks = (clip_chunks, clip_chunks)
+            self.module_meta.have_control = (control != None)
 
-                module_loader = AITLOADER.get_ait_module(self.module_meta)
+            module_loader = AITLOADER.get_ait_module(self.module_meta)
 
-                module_meta = module_loader.load_cache_exe()
-                if module_meta == None:
-                    # origin_device = self.alphas_cumprod.device
-                    # self.to("cpu")
-                    module_meta = module_loader.build_exe(control=control)
-                    # self.to(origin_device)
+            module_meta = module_loader.load_cache_exe()
+            if module_meta == None:
+                # origin_device = self.alphas_cumprod.device
+                # self.to("cpu")
+                module_meta = module_loader.build_exe(control=control)
+                # self.to(origin_device)
 
-                self.module_meta = module_meta
+            self.module_meta = module_meta
 
-                print("apply_unet to unet_ait_exe")
-                sd = self.state_dict()
-                keys = list(sd.keys())
-                for k in keys:
-                    if not k.startswith("diffusion_model."):
-                        sd.pop(k)
-                sd = comfy.utils.state_dict_prefix_replace(sd, {"diffusion_model.": ""})
-                module_loader.set_weights(sd)
-                self.unet_ait_exe = module_loader
+            print("apply_unet to unet_ait_exe")
+            sd = self.base_model_state_dict
+            keys = list(sd.keys())
+            for k in keys:
+                if not k.startswith("diffusion_model."):
+                    sd.pop(k)
+            sd = comfy.utils.state_dict_prefix_replace(sd, {"diffusion_model.": ""})
+            module_loader.set_weights(sd)
+            self.unet_ait_exe = module_loader
 
-            return self.unet_ait_exe.apply_model(xc, t, c_crossattn, c_adm, control, transformer_options)
-    return AitemplateBaseModel
+        return self.unet_ait_exe.apply_model(xc=x, t=timesteps, context=context, control=control, transformer_options=transformer_options, **kwargs)
 
 
-class AitemplateModelPatcher(comfy.model_patcher.ModelPatcher):
-    @staticmethod
-    def cast_from_model_patcher(other):
-        if isinstance(other, comfy.model_patcher.ModelPatcher):
-            other.__class__ = AitemplateModelPatcher
-            return other
-        raise ValueError(f"instance must be comfy.model_patcher.ModelPatcher")
+class AITPatch:
+    def __init__(self):
+        self.ait_model = None
 
-    def clone(self):
-        n = AitemplateModelPatcher(self.model, self.load_device, self.offload_device, self.size, self.current_device)
-        n.patches = {}
-        for k in self.patches:
-            n.patches[k] = self.patches[k][:]
+    def __call__(self, model_function, params):
+        input_x = params.get("input")
+        timestep_ = params.get("timestep")
+        c = params.get("c")
 
-        n.model_options = copy.deepcopy(self.model_options)
-        n.model_keys = self.model_keys
-        return n
+        if hasattr(model_function.__self__, "hf_device_map"):
+            return model_function(input_x, timestep_, **c)
 
-    def patch_model(self, device_to=None):
-        super().patch_model(device_to)
-        print("patch_model ", device_to)
-        self.aitemplate_model_cls = get_Aitemplate_model(type(self.model))
-        self.model = self.aitemplate_model_cls.cast_from_base_model(self.model)
-        return self.model
+        org_diffusion_model = model_function.__self__.diffusion_model
 
-    def unpatch_model(self, device_to=None):
-        if type(self.model) == self.aitemplate_model_cls:
-            self.model = self.model.cast_to_base_model()
-            self.aitemplate_model_cls = None
-        super().unpatch_model(device_to)
-        print("unpatch_model ", device_to)
+        if self.ait_model is None:
+            self.ait_model = AitemplateBaseModel()
+
+        self.ait_model.set_base_model(model_function.__self__)
+
+        model_function.__self__.diffusion_model = self.ait_model
+        try:
+            result = model_function(input_x, timestep_, **c)
+        finally:
+            model_function.__self__.diffusion_model = org_diffusion_model
+        return result
+
+    def to(self, a):
+        if self.ait_model is not None:
+            if a == torch.device("cpu"):
+                del self.ait_model
+                self.ait_model = None
+                print("unloaded AIT")
+        return self
 
 
 class ApplyAITemplateModel:
@@ -324,8 +238,10 @@ class ApplyAITemplateModel:
     CATEGORY = "loaders"
 
     def apply_aitemplate(self, model):
-        model = AitemplateModelPatcher.cast_from_model_patcher(model.clone())
-        return (model,)
+        patch = AITPatch()
+        model_ait = model.clone()
+        model_ait.set_model_unet_function_wrapper(patch)
+        return (model_ait,)
 
 
 class AitemplateAutoencoderKL(comfy.ldm.models.autoencoder.AutoencoderKL):
@@ -365,7 +281,7 @@ class AitemplateAutoencoderKL(comfy.ldm.models.autoencoder.AutoencoderKL):
                 or self.module_meta.width[1] < width
                 or self.module_meta.height[0] > height
                 or self.module_meta.height[1] < height
-            ):
+                ):
             if self.ait_exe != None:
                 del self.ait_exe
 
